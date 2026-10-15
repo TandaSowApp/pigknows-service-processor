@@ -19,11 +19,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Dynamic Batch Service & Arrival Processor")
+st.title("🐖 PigKnows Multi-Page & Multi-Scan Batch Processor")
 st.write(
-    "Upload your scanned service sheet. Automatically detects the batch"
-    " number from the page, parses services and Alt ID arrivals, and generates"
-    " both PigKnows-ready Excel files."
+    "Upload multiple scanned service sheets (PDFs or images) at once. The app"
+    " processes all pages, detects batch numbers, extracts services and Alt ID"
+    " arrivals, and builds unified Excel files."
 )
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -31,19 +31,17 @@ api_key = st.secrets.get("GEMINI_API_KEY", "")
 with st.sidebar:
   st.header("Rules Enforced")
   st.markdown("- Year: **2026**")
-  st.markdown(
-      "- Service Group: **Dynamic (Detected from page header, e.g., Batch"
-      " 1–10)**"
-  )
+  st.markdown("- Service Group: **Dynamic (Detected from page header)**")
   st.markdown("- Event Name: `SERVICE`")
   st.markdown("- Service Type: `3= MS (Mixed Semen)`")
   st.markdown("- Service Location: *Blank*")
   st.markdown("- Remark Precedence: `Early` > `Tra`")
   st.markdown("- Arrival Date: **1 day before 1st breeding**")
 
-uploaded_file = st.file_uploader(
-    "Upload Service Sheet Scan (PDF, PNG, JPG)",
+uploaded_files = st.file_uploader(
+    "Upload Service Sheet Scans (PDF, PNG, JPG)",
     type=["pdf", "png", "jpg", "jpeg"],
+    accept_multiple_files=True,
 )
 
 
@@ -60,18 +58,23 @@ def convert_pdf_to_images(pdf_bytes):
   return images
 
 
-if uploaded_file:
+if uploaded_files:
   image_bytes_list = []
 
-  if uploaded_file.type == "application/pdf":
-    st.info("PDF scan detected. Converting pages for vision processing...")
-    pdf_bytes = uploaded_file.getvalue()
-    image_bytes_list = convert_pdf_to_images(pdf_bytes)
-  else:
-    image_bytes_list = [uploaded_file.getvalue()]
-    st.image(uploaded_file, caption="Uploaded Scan", use_container_width=True)
+  for uploaded_file in uploaded_files:
+    if uploaded_file.type == "application/pdf":
+      pdf_bytes = uploaded_file.getvalue()
+      pages_imgs = convert_pdf_to_images(pdf_bytes)
+      image_bytes_list.extend(pages_imgs)
+    else:
+      image_bytes_list.append(uploaded_file.getvalue())
 
-  if st.button("🔍 Extract Data with Gemini Free AI", type="primary"):
+  st.info(
+      f"Loaded {len(uploaded_files)} file(s) resulting in"
+      f" {len(image_bytes_list)} total page(s) to process."
+  )
+
+  if st.button("🔍 Extract Data from All Pages", type="primary"):
     if not api_key:
       st.error(
           "API key not found. Please add GEMINI_API_KEY to your Streamlit App"
@@ -79,23 +82,22 @@ if uploaded_file:
       )
     else:
       with st.spinner(
-          "Reading batch header, handwriting, and Alt ID arrivals..."
+          "Reading all pages, batch headers, handwriting, and Alt ID arrivals..."
       ):
         try:
           client = genai.Client(api_key=api_key)
           all_parsed_rows = []
-          detected_batch = 1  # Default fallback
 
-          for i, img_bytes in enumerate(image_bytes_list):
+          for idx, img_bytes in enumerate(image_bytes_list):
             image_part = types.Part.from_bytes(
                 data=img_bytes, mime_type="image/jpeg"
             )
 
-            prompt = """
-                        You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets.
-                        1. Look at the top of the page header (e.g., 'Batch 2') and extract the batch/group number as an integer (1 to 10). Return it in your JSON structure or look for it.
+            prompt = f"""
+                        You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets (Page {idx+1} of {len(image_bytes_list)}).
+                        1. Look at the top of the page header (e.g., 'Batch 2') and extract the batch/group number as an integer (1 to 10).
                         2. Extract every row from the image into a JSON list of objects with these exact keys:
-                           - "Batch" (integer, detected from the page header, e.g. 2)
+                           - "Batch" (integer, detected from page header, e.g. 2)
                            - "Sow ID" (string, e.g., "6142")
                            - "Event Date" (string in YYYY-MM-DD format, assuming year 2026. Dates carry down if blank).
                            - "Tech 1" (string, e.g., "VA" or "V2")
@@ -121,7 +123,10 @@ if uploaded_file:
             all_parsed_rows.extend(page_rows)
 
           st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
-          st.success("Extraction complete!")
+          st.success(
+              f"Successfully extracted {len(all_parsed_rows)} total rows across"
+              f" {len(image_bytes_list)} page(s)!"
+          )
           st.rerun()
 
         except Exception as e:
@@ -187,7 +192,6 @@ if "df_extracted" in st.session_state:
       t2 = str(row["Tech 2"]).strip() if pd.notna(row["Tech 2"]) else ""
       comments = str(row["Comments"]).strip() if pd.notna(row["Comments"]) else ""
 
-      # Get batch number from row, defaulting to 1 if invalid
       try:
         batch_num = int(row["Batch"])
       except (ValueError, TypeError):
@@ -205,13 +209,11 @@ if "df_extracted" in st.session_state:
 
       actual_t2 = "" if t2.upper() == "X" else t2
 
-      # Extract Alt ID if present in comments (e.g. "Alt 38310 B")
       alt_id = ""
       alt_match = re.search(r"alt\s*([0-9a-zA-Z-]+)", comments, re.IGNORECASE)
       if alt_match:
         alt_id = alt_match.group(1)
 
-      # Clean remarks
       cleaned_remark = ""
       if "early" in comments.lower():
         cleaned_remark = "Early"
@@ -226,7 +228,6 @@ if "df_extracted" in st.session_state:
         except ValueError:
           date2 = ""
 
-      # 1. Build Service Row with dynamic Service Group
       if sow_id and sow_id != "nan":
         service_rows.append({
             ";Sow ID": sow_id,
@@ -263,7 +264,6 @@ if "df_extracted" in st.session_state:
             "Tech 5": "",
         })
 
-        # 2. Build Arrival Row if Alt ID exists
         if alt_id:
           arrival_rows.append({
               ";Sow ID": sow_id,
