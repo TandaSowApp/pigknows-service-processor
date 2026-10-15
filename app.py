@@ -10,9 +10,9 @@ from PIL import Image
 import streamlit as st
 
 try:
-  import fitz  # PyMuPDF
+  from pdf2image import convert_from_bytes
 except ImportError:
-  fitz = None
+  convert_from_bytes = None
 
 st.set_page_config(
     page_title="PigKnows Service & Arrival Processor",
@@ -20,10 +20,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Fast Batch Processor")
+st.title("🐖 PigKnows Stable Batch Processor")
 st.write(
-    "Upload your scanned service sheets. Optimized for fast processing, batch"
-    " detection, and instant Excel generation."
+    "Upload your scanned service sheets (PDF or images). Fast, robust, and"
+    " crash-proof."
 )
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -45,23 +45,23 @@ uploaded_files = st.file_uploader(
 )
 
 
-def convert_pdf_to_optimized_images(pdf_bytes):
+def process_pdf_to_images(pdf_bytes):
   images_bytes = []
-  if not fitz:
-    st.error("PyMuPDF (fitz) is missing from requirements.txt")
+  if not convert_from_bytes:
+    st.error(
+        "pdf2image is missing from requirements.txt or poppler is not installed."
+    )
     return images_bytes
-  doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-  for page_num in range(len(doc)):
-    page = doc[page_num]
-    # Lower DPI to 120 and resize to prevent memory crashes while keeping text sharp
-    pix = page.get_pixmap(dpi=120)
-    img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
-
-    # Resize if too large
-    img.thumbnail((1600, 1600))
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=85)
-    images_bytes.append(buffer.getvalue())
+  try:
+    # Convert PDF bytes to PIL images
+    pil_images = convert_from_bytes(pdf_bytes, dpi=150)
+    for img in pil_images:
+      img.thumbnail((1600, 1600))
+      buffer = io.BytesIO()
+      img.save(buffer, format="JPEG", quality=85)
+      images_bytes.append(buffer.getvalue())
+  except Exception as e:
+    st.error(f"Error converting PDF: {e}")
   return images_bytes
 
 
@@ -71,17 +71,16 @@ if uploaded_files:
   for uploaded_file in uploaded_files:
     if uploaded_file.type == "application/pdf":
       pdf_bytes = uploaded_file.getvalue()
-      pages_imgs = convert_pdf_to_optimized_images(pdf_bytes)
+      pages_imgs = process_pdf_to_images(pdf_bytes)
       image_bytes_list.extend(pages_imgs)
     else:
-      # Compress uploaded image
       img = Image.open(uploaded_file)
       img.thumbnail((1600, 1600))
       buffer = io.BytesIO()
       img.save(buffer, format="JPEG", quality=85)
       image_bytes_list.append(buffer.getvalue())
 
-  st.info(f"Prepared {len(image_bytes_list)} page(s) for fast processing.")
+  st.info(f"Successfully loaded {len(image_bytes_list)} page(s) ready for AI.")
 
   if st.button("🔍 Extract Data Instantly", type="primary"):
     if not api_key:
