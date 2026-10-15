@@ -6,6 +6,12 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
+# PDF processing library
+try:
+  import fitz  # PyMuPDF
+except ImportError:
+  fitz = None
+
 try:
   from openai import OpenAI
 except ImportError:
@@ -19,8 +25,8 @@ st.set_page_config(
 
 st.title("🐖 PigKnows Service Sheet Processor")
 st.write(
-    "Upload your scanned service sheet. The app extracts the handwriting,"
-    " allows you to verify any low-confidence entries, and exports a clean"
+    "Upload your scanned service sheet (PDF or image). The app extracts the"
+    " handwriting, lets you verify any entries, and exports a clean"
     " PigKnows-ready Excel file."
 )
 
@@ -43,112 +49,110 @@ with st.sidebar:
   st.markdown("- Remark Precedence: `Early` > `Tra`")
 
 uploaded_file = st.file_uploader(
-    "Upload Scanned Service Sheet (PNG, JPG, JPEG)",
-    type=["png", "jpg", "jpeg"],
+    "Upload Service Sheet Scan (PDF, PNG, JPG)",
+    type=["pdf", "png", "jpg", "jpeg"],
 )
 
+
+def convert_pdf_to_images(pdf_bytes):
+  """Converts PDF pages into a list of image bytes using PyMuPDF (fitz)"""
+  images = []
+  if not fitz:
+    st.error(
+        "PyMuPDF (fitz) is not installed. Please add PyMuPDF to requirements.txt"
+    )
+    return images
+  doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+  for page_num in range(len(doc)):
+    page = doc[page_num]
+    pix = page.get_pixmap(dpi=200)  # 200 DPI for sharp handwriting recognition
+    images.append(pix.tobytes("jpeg"))
+  return images
+
+
 if uploaded_file:
-  st.image(uploaded_file, caption="Uploaded Scan", use_container_width=True)
+  image_bytes_list = []
+
+  if uploaded_file.type == "application/pdf":
+    st.info(
+        "PDF file detected. Converting pages to high-resolution images for"
+        " vision processing..."
+    )
+    pdf_bytes = uploaded_file.getvalue()
+    image_bytes_list = convert_pdf_to_images(pdf_bytes)
+    st.success(f"Converted {len(image_bytes_list)} page(s) from PDF successfully!")
+  else:
+    image_bytes_list = [uploaded_file.getvalue()]
+    st.image(uploaded_file, caption="Uploaded Scan", use_container_width=True)
 
   if st.button("🔍 Extract Data from Scan", type="primary"):
-    if not api_key and OpenAI:
+    if not api_key:
       st.error("Please enter your OpenAI API key in the sidebar first.")
     else:
       with st.spinner("Analyzing handwriting and parsing rows..."):
         try:
-          # Convert uploaded image to bytes for Vision API
-          image_bytes = uploaded_file.getvalue()
-
           client = OpenAI(api_key=api_key)
+          all_parsed_rows = []
 
-          prompt = """
-                    You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets.
-                    Extract every row from the image into a JSON list of objects with these exact keys:
-                    - "Sow ID" (string, e.g., "6142")
-                    - "Event Date" (string in YYYY-MM-DD format, assuming year 2026)
-                    - "Tech 1" (string, e.g., "VA" or "V2")
-                    - "Tech 2" (string, e.g., "V2", "VA", or "X" if skipped/blank)
-                    - "Remark" (string, e.g., "Early", "Tra", or blank if none)
-                    - "Confidence" (float between 0.0 and 1.0 indicating OCR certainty on the Sow ID digits)
-                    
-                    Follow technician propagation rules: if Tech 1 or Tech 2 is blank on a row, it carries over from above.
-                    Return ONLY valid JSON. No markdown wrappers around the JSON if possible, or standard json format.
-                    """
+          for img_bytes in image_bytes_list:
+            import base64
 
-          import base64
+            base64_image = base64.b64encode(img_bytes).decode("utf-8")
 
-          base64_image = base64.b64encode(image_bytes).decode("utf-8")
+            prompt = """
+                        You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets.
+                        Extract every row from the image into a JSON list of objects with these exact keys:
+                        - "Sow ID" (string, e.g., "6142")
+                        - "Event Date" (string in YYYY-MM-DD format, assuming year 2026)
+                        - "Tech 1" (string, e.g., "VA" or "V2")
+                        - "Tech 2" (string, e.g., "V2", "VA", or "X" if skipped/blank)
+                        - "Remark" (string, e.g., "Early", "Tra", or blank if none)
+                        - "Confidence" (float between 0.0 and 1.0 indicating OCR certainty on the Sow ID digits)
+                        
+                        Follow technician propagation rules: if Tech 1 or Tech 2 is blank on a row, it carries over from above.
+                        Return ONLY valid JSON list. No extra conversational wrapper.
+                        """
 
-          response = client.chat.completions.create(
-              model="gpt-4o",
-              messages=[{
-                  "role": "user",
-                  "content": [
-                      {"type": "text", "text": prompt},
-                      {
-                          "type": "image_url",
-                          "image_url": {
-                              "url": f"data:image/jpeg;base64,{base64_image}"
-                          },
-                      },
-                  ],
-              }],
-              max_tokens=4000,
-          )
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            },
+                        },
+                    ],
+                }],
+                max_tokens=4000,
+            )
 
-          content = response.choices[0].message.content
-          # Clean up response if it contains markdown code blocks
-          if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-          elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
+            content = response.choices[0].message.content
+            if "```json" in content:
+              content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+              content = content.split("```")[1].split("```")[0].strip()
 
-          parsed_data = json.loads(content)
-          st.session_data = pd.DataFrame(parsed_data)
+            page_rows = json.loads(content)
+            all_parsed_rows.extend(page_rows)
+
+          st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
           st.success("Extraction complete!")
           st.rerun()
 
         except Exception as e:
-          st.error(
-              f"Error during AI vision parsing: {e}. Falling back to sample"
-              " structure."
-          )
-          # Fallback sample data if API call fails
-          fallback_data = [
-              {
-                  "Sow ID": "6142",
-                  "Confidence": 0.98,
-                  "Event Date": "2026-10-09",
-                  "Tech 1": "VA",
-                  "Tech 2": "V2",
-                  "Remark": "Early Tra",
-              },
-              {
-                  "Sow ID": "6143",
-                  "Confidence": 0.95,
-                  "Event Date": "2026-10-09",
-                  "Tech 1": "V2",
-                  "Tech 2": "V2",
-                  "Remark": "Early Tra",
-              },
-              {
-                  "Sow ID": "6152",
-                  "Confidence": 0.65,
-                  "Event Date": "2026-10-10",
-                  "Tech 1": "V2",
-                  "Tech 2": "X",
-                  "Remark": "Tra",
-              },
-          ]
-          st.session_state["df_extracted"] = pd.DataFrame(fallback_data)
+          st.error(f"Error during AI vision parsing: {e}")
 
 # If extracted data exists in session state, show interactive editor
 if "df_extracted" in st.session_state:
   st.markdown("---")
   st.subheader("📋 Step 2: Verify & Edit Extracted Data")
   st.markdown(
-      "Review the parsed rows. Any low-confidence Sow ID digits can be edited"
-      " directly in the table before generating your file."
+      "Review the parsed rows below. Edit any numbers if the handwriting was"
+      " ambiguous."
   )
 
   edited_df = st.data_editor(
@@ -171,7 +175,7 @@ if "df_extracted" in st.session_state:
   )
 
   if st.button(
-      "🚀 Generate PigKnows Excel Import File",
+      "🚀 Generate PigKnows-Ready Excel File",
       type="primary",
       use_container_width=True,
   ):
