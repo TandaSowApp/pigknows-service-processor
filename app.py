@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Native PDF & Batch Processor")
+st.title("🐖 PigKnows Resilient Batch Processor")
 st.write(
     "Upload your scanned service sheets (PDF or images). Fast, robust, and"
     " crash-proof."
@@ -39,7 +39,7 @@ with st.sidebar:
   st.markdown("- Arrival Date: **1 day before 1st breeding**")
 
 uploaded_files = st.file_uploader(
-    "Upload Service Sheet Scans (PDF, PNG, JPG)",
+    "Upload Service Sheet Scans (PDF, PNG, JPG) - Keep under 5MB / 200 DPI",
     type=["pdf", "png", "jpg", "jpeg"],
     accept_multiple_files=True,
 )
@@ -54,7 +54,6 @@ def convert_pdf_to_images(pdf_bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     for page_num in range(len(doc)):
       page = doc[page_num]
-      # 150 DPI is crisp for text and keeps file size tiny
       pix = page.get_pixmap(dpi=150)
       img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
       img.thumbnail((1600, 1600))
@@ -165,73 +164,87 @@ if "df_extracted" in st.session_state:
       type="primary",
       use_container_width=True,
   ):
-    service_rows = []
-    arrival_rows = []
+    try:
+      service_rows = []
+      arrival_rows = []
 
-    last_tech1 = "VA"
-    last_tech2 = "V2"
+      last_tech1 = "VA"
+      last_tech2 = "V2"
 
-    first_breeding_date = None
-    for _, row in edited_df.iterrows():
-      dt_str = str(row["Event Date"]).strip()
-      if dt_str and dt_str != "nan":
+      first_breeding_date = None
+      for _, row in edited_df.iterrows():
+        dt_str = str(row.get("Event Date", "")).strip()
+        if dt_str and dt_str != "nan":
+          try:
+            first_breeding_date = datetime.strptime(dt_str, "%Y-%m-%d")
+            break
+          except ValueError:
+            pass
+
+      if not first_breeding_date:
+        first_breeding_date = datetime(2026, 10, 9)
+
+      arrival_date_str = (first_breeding_date - timedelta(days=1)).strftime(
+          "%Y-%m-%d"
+      )
+
+      for _, row in edited_df.iterrows():
+        sow_id = str(row.get("Sow ID", "")).strip()
+        if not sow_id or sow_id == "nan" or sow_id == "None":
+          continue
+
+        event_date = str(row.get("Event Date", "")).strip()
+        if event_date == "nan" or event_date == "None":
+          event_date = ""
+
+        t1 = str(row.get("Tech 1", "")).strip()
+        if t1 == "nan" or t1 == "None":
+          t1 = ""
+
+        t2 = str(row.get("Tech 2", "")).strip()
+        if t2 == "nan" or t2 == "None":
+          t2 = ""
+
+        comments = str(row.get("Comments", "")).strip()
+        if comments == "nan" or comments == "None":
+          comments = ""
+
         try:
-          first_breeding_date = datetime.strptime(dt_str, "%Y-%m-%d")
-          break
-        except ValueError:
-          pass
+          batch_num = int(row.get("Batch", 1))
+        except (ValueError, TypeError):
+          batch_num = 1
 
-    if not first_breeding_date:
-      first_breeding_date = datetime(2026, 10, 9)
+        if t1 != "":
+          last_tech1 = t1
+        else:
+          t1 = last_tech1
 
-    arrival_date_str = (first_breeding_date - timedelta(days=1)).strftime(
-        "%Y-%m-%d"
-    )
+        if t2 != "":
+          last_tech2 = t2
+        else:
+          t2 = last_tech2
 
-    for _, row in edited_df.iterrows():
-      sow_id = str(row["Sow ID"]).strip()
-      event_date = str(row["Event Date"]).strip()
-      t1 = str(row["Tech 1"]).strip() if pd.notna(row["Tech 1"]) else ""
-      t2 = str(row["Tech 2"]).strip() if pd.notna(row["Tech 2"]) else ""
-      comments = str(row["Comments"]).strip() if pd.notna(row["Comments"]) else ""
+        actual_t2 = "" if t2.upper() == "X" else t2
 
-      try:
-        batch_num = int(row["Batch"])
-      except (ValueError, TypeError):
-        batch_num = 1
+        alt_id = ""
+        alt_match = re.search(r"alt\s*([0-9a-zA-Z-]+)", comments, re.IGNORECASE)
+        if alt_match:
+          alt_id = alt_match.group(1)
 
-      if t1 != "":
-        last_tech1 = t1
-      else:
-        t1 = last_tech1
+        cleaned_remark = ""
+        if "early" in comments.lower():
+          cleaned_remark = "Early"
+        elif "tra" in comments.lower():
+          cleaned_remark = "Tra"
 
-      if t2 != "":
-        last_tech2 = t2
-      else:
-        t2 = last_tech2
+        date2 = ""
+        if actual_t2 and event_date:
+          try:
+            dt = datetime.strptime(event_date, "%Y-%m-%d")
+            date2 = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
+          except ValueError:
+            date2 = ""
 
-      actual_t2 = "" if t2.upper() == "X" else t2
-
-      alt_id = ""
-      alt_match = re.search(r"alt\s*([0-9a-zA-Z-]+)", comments, re.IGNORECASE)
-      if alt_match:
-        alt_id = alt_match.group(1)
-
-      cleaned_remark = ""
-      if "early" in comments.lower():
-        cleaned_remark = "Early"
-      elif "tra" in comments.lower():
-        cleaned_remark = "Tra"
-
-      date2 = ""
-      if actual_t2 and event_date:
-        try:
-          dt = datetime.strptime(event_date, "%Y-%m-%d")
-          date2 = (dt + timedelta(days=1)).strftime("%Y-%m-%d")
-        except ValueError:
-          date2 = ""
-
-      if sow_id and sow_id != "nan":
         service_rows.append({
             ";Sow ID": sow_id,
             "Event Date": event_date,
@@ -276,215 +289,223 @@ if "df_extracted" in st.session_state:
               "Batch": batch_num,
           })
 
-    # --- Generate Service Excel ---
-    df_services = pd.DataFrame(service_rows)
-    template_header_rows = [
-        {
-            ";Sow ID": ";",
-            "Event Date": None,
-            "Event Name": "SERVICE",
-            "Service Group": None,
-            "Service Type": "1= AI (Artificial Insemination)",
-            "Service Location": None,
-            "Boar 1": None,
-            "Tech 1": None,
-            "Date 2": None,
-            "Boar 2": None,
-            "Tech 2": None,
-            "Date 3": None,
-            "Boar 3": None,
-            "Tech 3": None,
-            "Remark": None,
-            "Semen Age 1": None,
-            "Semen Age 2": None,
-            "Semen Age 3": None,
-            "Serv Score 1": None,
-            "Serv Time 1": None,
-            "Serv Time 2": None,
-            "Serv Time 3": None,
-            "Serv Score 2": None,
-            "Serv Score 3": None,
-            "Weight": None,
-            "Sow Weight": None,
-            "Date 4": None,
-            "Boar 4": None,
-            "Tech 4": None,
-            "Date 5": None,
-            "Boar 5": None,
-            "Tech 5": None,
-        },
-        {
-            ";Sow ID": ";",
-            "Event Date": None,
-            "Event Name": "SERVICE",
-            "Service Group": None,
-            "Service Type": "2= NS (Natural Service)",
-            "Service Location": None,
-            "Boar 1": None,
-            "Tech 1": None,
-            "Date 2": None,
-            "Boar 2": None,
-            "Tech 2": None,
-            "Date 3": None,
-            "Boar 3": None,
-            "Tech 3": None,
-            "Remark": None,
-            "Semen Age 1": None,
-            "Semen Age 2": None,
-            "Semen Age 3": None,
-            "Serv Score 1": None,
-            "Serv Time 1": None,
-            "Serv Time 2": None,
-            "Serv Time 3": None,
-            "Serv Score 2": None,
-            "Serv Score 3": None,
-            "Weight": None,
-            "Sow Weight": None,
-            "Date 4": None,
-            "Boar 4": None,
-            "Tech 4": None,
-            "Date 5": None,
-            "Boar 5": None,
-            "Tech 5": None,
-        },
-        {
-            ";Sow ID": ";",
-            "Event Date": None,
-            "Event Name": "SERVICE",
-            "Service Group": None,
-            "Service Type": "3= MS (Mixed Semen)",
-            "Service Location": None,
-            "Boar 1": None,
-            "Tech 1": None,
-            "Date 2": None,
-            "Boar 2": None,
-            "Tech 2": None,
-            "Date 3": None,
-            "Boar 3": None,
-            "Tech 3": None,
-            "Remark": None,
-            "Semen Age 1": None,
-            "Semen Age 2": None,
-            "Semen Age 3": None,
-            "Serv Score 1": None,
-            "Serv Time 1": None,
-            "Serv Time 2": None,
-            "Serv Time 3": None,
-            "Serv Score 2": None,
-            "Serv Score 3": None,
-            "Weight": None,
-            "Sow Weight": None,
-            "Date 4": None,
-            "Boar 4": None,
-            "Tech 4": None,
-            "Date 5": None,
-            "Boar 5": None,
-            "Tech 5": None,
-        },
-        {
-            ";Sow ID": ";",
-            "Event Date": None,
-            "Event Name": "SERVICE",
-            "Service Group": None,
-            "Service Type": "4= AN (Artificial, Natural)",
-            "Service Location": None,
-            "Boar 1": None,
-            "Tech 1": None,
-            "Date 2": None,
-            "Boar 2": None,
-            "Tech 2": None,
-            "Date 3": None,
-            "Boar 3": None,
-            "Tech 3": None,
-            "Remark": None,
-            "Semen Age 1": None,
-            "Semen Age 2": None,
-            "Semen Age 3": None,
-            "Serv Score 1": None,
-            "Serv Time 1": None,
-            "Serv Time 2": None,
-            "Serv Time 3": None,
-            "Serv Score 2": None,
-            "Serv Score 3": None,
-            "Weight": None,
-            "Sow Weight": None,
-            "Date 4": None,
-            "Boar 4": None,
-            "Tech 4": None,
-            "Date 5": None,
-            "Boar 5": None,
-            "Tech 5": None,
-        },
-        {
-            ";Sow ID": ";",
-            "Event Date": None,
-            "Event Name": "SERVICE",
-            "Service Group": None,
-            "Service Type": "5= NA (Natural, Artificial)",
-            "Service Location": None,
-            "Boar 1": None,
-            "Tech 1": None,
-            "Date 2": None,
-            "Boar 2": None,
-            "Tech 2": None,
-            "Date 3": None,
-            "Boar 3": None,
-            "Tech 3": None,
-            "Remark": None,
-            "Semen Age 1": None,
-            "Semen Age 2": None,
-            "Semen Age 3": None,
-            "Serv Score 1": None,
-            "Serv Time 1": None,
-            "Serv Time 2": None,
-            "Serv Time 3": None,
-            "Serv Score 2": None,
-            "Serv Score 3": None,
-            "Weight": None,
-            "Sow Weight": None,
-            "Date 4": None,
-            "Boar 4": None,
-            "Tech 4": None,
-            "Date 5": None,
-            "Boar 5": None,
-            "Tech 5": None,
-        },
-    ]
+      # --- Generate Service Excel ---
+      df_services = pd.DataFrame(service_rows)
+      template_header_rows = [
+          {
+              ";Sow ID": ";",
+              "Event Date": None,
+              "Event Name": "SERVICE",
+              "Service Group": None,
+              "Service Type": "1= AI (Artificial Insemination)",
+              "Service Location": None,
+              "Boar 1": None,
+              "Tech 1": None,
+              "Date 2": None,
+              "Boar 2": None,
+              "Tech 2": None,
+              "Date 3": None,
+              "Boar 3": None,
+              "Tech 3": None,
+              "Remark": None,
+              "Semen Age 1": None,
+              "Semen Age 2": None,
+              "Semen Age 3": None,
+              "Serv Score 1": None,
+              "Serv Time 1": None,
+              "Serv Time 2": None,
+              "Serv Time 3": None,
+              "Serv Score 2": None,
+              "Serv Score 3": None,
+              "Weight": None,
+              "Sow Weight": None,
+              "Date 4": None,
+              "Boar 4": None,
+              "Tech 4": None,
+              "Date 5": None,
+              "Boar 5": None,
+              "Tech 5": None,
+          },
+          {
+              ";Sow ID": ";",
+              "Event Date": None,
+              "Event Name": "SERVICE",
+              "Service Group": None,
+              "Service Type": "2= NS (Natural Service)",
+              "Service Location": None,
+              "Boar 1": None,
+              "Tech 1": None,
+              "Date 2": None,
+              "Boar 2": None,
+              "Tech 2": None,
+              "Date 3": None,
+              "Boar 3": None,
+              "Tech 3": None,
+              "Remark": None,
+              "Semen Age 1": None,
+              "Semen Age 2": None,
+              "Semen Age 3": None,
+              "Serv Score 1": None,
+              "Serv Time 1": None,
+              "Serv Time 2": None,
+              "Serv Time 3": None,
+              "Serv Score 2": None,
+              "Serv Score 3": None,
+              "Weight": None,
+              "Sow Weight": None,
+              "Date 4": None,
+              "Boar 4": None,
+              "Tech 4": None,
+              "Date 5": None,
+              "Boar 5": None,
+              "Tech 5": None,
+          },
+          {
+              ";Sow ID": ";",
+              "Event Date": None,
+              "Event Name": "SERVICE",
+              "Service Group": None,
+              "Service Type": "3= MS (Mixed Semen)",
+              "Service Location": None,
+              "Boar 1": None,
+              "Tech 1": None,
+              "Date 2": None,
+              "Boar 2": None,
+              "Tech 2": None,
+              "Date 3": None,
+              "Boar 3": None,
+              "Tech 3": None,
+              "Remark": None,
+              "Semen Age 1": None,
+              "Semen Age 2": None,
+              "Semen Age 3": None,
+              "Serv Score 1": None,
+              "Serv Time 1": None,
+              "Serv Time 2": None,
+              "Serv Time 3": None,
+              "Serv Score 2": None,
+              "Serv Score 3": None,
+              "Weight": None,
+              "Sow Weight": None,
+              "Date 4": None,
+              "Boar 4": None,
+              "Tech 4": None,
+              "Date 5": None,
+              "Boar 5": None,
+              "Tech 5": None,
+          },
+          {
+              ";Sow ID": ";",
+              "Event Date": None,
+              "Event Name": "SERVICE",
+              "Service Group": None,
+              "Service Type": "4= AN (Artificial, Natural)",
+              "Service Location": None,
+              "Boar 1": None,
+              "Tech 1": None,
+              "Date 2": None,
+              "Boar 2": None,
+              "Tech 2": None,
+              "Date 3": None,
+              "Boar 3": None,
+              "Tech 3": None,
+              "Remark": None,
+              "Semen Age 1": None,
+              "Semen Age 2": None,
+              "Semen Age 3": None,
+              "Serv Score 1": None,
+              "Serv Time 1": None,
+              "Serv Time 2": None,
+              "Serv Time 3": None,
+              "Serv Score 2": None,
+              "Serv Score 3": None,
+              "Weight": None,
+              "Sow Weight": None,
+              "Date 4": None,
+              "Boar 4": None,
+              "Tech 4": None,
+              "Date 5": None,
+              "Boar 5": None,
+              "Tech 5": None,
+          },
+          {
+              ";Sow ID": ";",
+              "Event Date": None,
+              "Event Name": "SERVICE",
+              "Service Group": None,
+              "Service Type": "5= NA (Natural, Artificial)",
+              "Service Location": None,
+              "Boar 1": None,
+              "Tech 1": None,
+              "Date 2": None,
+              "Boar 2": None,
+              "Tech 2": None,
+              "Date 3": None,
+              "Boar 3": None,
+              "Tech 3": None,
+              "Remark": None,
+              "Semen Age 1": None,
+              "Semen Age 2": None,
+              "Semen Age 3": None,
+              "Serv Score 1": None,
+              "Serv Time 1": None,
+              "Serv Time 2": None,
+              "Serv Time 3": None,
+              "Serv Score 2": None,
+              "Serv Score 3": None,
+              "Weight": None,
+              "Sow Weight": None,
+              "Date 4": None,
+              "Boar 4": None,
+              "Tech 4": None,
+              "Date 5": None,
+              "Boar 5": None,
+              "Tech 5": None,
+          },
+      ]
 
-    df_services_final = pd.concat(
-        [pd.DataFrame(template_header_rows), df_services], ignore_index=True
-    )
+      if not df_services.empty:
+        df_services_final = pd.concat(
+            [pd.DataFrame(template_header_rows), df_services], ignore_index=True
+        )
+      else:
+        df_services_final = pd.DataFrame(template_header_rows)
 
-    serv_buffer = io.BytesIO()
-    with pd.ExcelWriter(serv_buffer, engine="openpyxl") as writer:
-      df_services_final.to_excel(writer, sheet_name="SERVICE", index=False)
+      serv_buffer = io.BytesIO()
+      with pd.ExcelWriter(serv_buffer, engine="openpyxl") as writer:
+        df_services_final.to_excel(writer, sheet_name="SERVICE", index=False)
 
-    # --- Generate Arrivals Excel ---
-    df_arrivals = pd.DataFrame(arrival_rows)
-    arr_buffer = io.BytesIO()
-    with pd.ExcelWriter(arr_buffer, engine="openpyxl") as writer:
-      df_arrivals.to_excel(writer, sheet_name="ARRIVAL", index=False)
+      # --- Generate Arrivals Excel ---
+      df_arrivals = pd.DataFrame(arrival_rows)
+      arr_buffer = io.BytesIO()
+      with pd.ExcelWriter(arr_buffer, engine="openpyxl") as writer:
+        df_arrivals.to_excel(writer, sheet_name="ARRIVAL", index=False)
 
-    st.success("Excel files successfully built!")
+      st.success("Excel files successfully built!")
 
-    col1, col2 = st.columns(2)
-    with col1:
-      st.download_button(
-          label="📥 Download PigKnows_Services.xlsx",
-          data=serv_buffer.getvalue(),
-          file_name="PigKnows_Services.xlsx",
-          mime=(
-              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          ),
-          use_container_width=True,
-      )
-    with col2:
-      st.download_button(
-          label="📥 Download PigKnows_Arrivals.xlsx",
-          data=arr_buffer.getvalue(),
-          file_name="PigKnows_Arrivals.xlsx",
-          mime=(
-              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-          ),
-          use_container_width=True,
+      col1, col2 = st.columns(2)
+      with col1:
+        st.download_button(
+            label="📥 Download PigKnows_Services.xlsx",
+            data=serv_buffer.getvalue(),
+            file_name="PigKnows_Services.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+      with col2:
+        st.download_button(
+            label="📥 Download PigKnows_Arrivals.xlsx",
+            data=arr_buffer.getvalue(),
+            file_name="PigKnows_Arrivals.xlsx",
+            mime=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+        )
+    except Exception as e:
+      st.error(
+          f"An error occurred while generating Excel files: {e}. Please check"
+          " your edited values."
       )
