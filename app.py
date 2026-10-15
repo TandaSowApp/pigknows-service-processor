@@ -16,16 +16,13 @@ except ImportError:
   fitz = None
 
 st.set_page_config(
-    page_title="PigKnows Resilient Batch Processor",
+    page_title="PigKnows Service & Arrival Processor",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Resilient Batch Processor")
-st.write(
-    "Upload your scanned service sheets (PDF or images). Features automatic"
-    " traffic retry protection."
-)
+st.title("🐖 PigKnows Cloud Batch Processor")
+st.write("Upload your scanned service sheets. Ready for processing.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 
@@ -90,20 +87,24 @@ if uploaded_files:
           " Secrets."
       )
     else:
-      with st.spinner(
-          "Processing pages with Gemini AI (with auto-retry protection)..."
-      ):
-        try:
-          client = genai.Client(api_key=api_key)
-          all_parsed_rows = []
+      progress_bar = st.progress(0)
+      status_text = st.empty()
+      try:
+        client = genai.Client(api_key=api_key)
+        all_parsed_rows = []
+        total_pages = len(image_bytes_list)
 
-          for idx, img_bytes in enumerate(image_bytes_list):
-            image_part = types.Part.from_bytes(
-                data=img_bytes, mime_type="image/jpeg"
-            )
+        for idx, img_bytes in enumerate(image_bytes_list):
+          status_text.text(
+              f"Processing page {idx + 1} of {total_pages} using Gemini 2.5"
+              " Flash..."
+          )
+          image_part = types.Part.from_bytes(
+              data=img_bytes, mime_type="image/jpeg"
+          )
 
-            prompt = f"""
-                        You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets (Page {idx+1} of {len(image_bytes_list)}).
+          prompt = f"""
+                        You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets (Page {idx+1} of {total_pages}).
                         1. Look at the top of the page header (e.g., 'Batch 2') and extract the batch/group number as an integer (1 to 10).
                         2. Extract every row from the image into a JSON list of objects with these exact keys:
                            - "Batch" (integer, detected from page header, e.g. 2)
@@ -118,38 +119,30 @@ if uploaded_files:
                         Return ONLY valid JSON list. No markdown wrappers or conversational text.
                         """
 
-            # Retry loop to handle 533/503 high demand spikes gracefully
-            response = None
-            max_retries = 3
-            for attempt in range(max_retries):
-              try:
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash", contents=[image_part, prompt]
-                )
-                break
-              except Exception as api_err:
-                if attempt == max_retries - 1:
-                  raise api_err
-                time.sleep(2 * (attempt + 1))  # Wait before retrying
-
-            content = response.text.strip()
-            if "```json" in content:
-              content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-              content = content.split("```")[1].split("```")[0].strip()
-
-            page_rows = json.loads(content)
-            all_parsed_rows.extend(page_rows)
-
-          st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
-          st.success("Extraction complete!")
-          st.rerun()
-
-        except Exception as e:
-          st.error(
-              f"Error during AI vision parsing: {e}. Please wait a moment and"
-              " try clicking extract again."
+          response = client.models.generate_content(
+              model="gemini-2.5-flash", contents=[image_part, prompt]
           )
+
+          content = response.text.strip()
+          if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+          elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+
+          page_rows = json.loads(content)
+          all_parsed_rows.extend(page_rows)
+
+          progress_bar.progress((idx + 1) / total_pages)
+          if idx < total_pages - 1:
+            time.sleep(1)
+
+        status_text.text("Extraction complete!")
+        st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
+        st.success("Extraction complete!")
+        st.rerun()
+
+      except Exception as e:
+        st.error(f"Error during AI vision parsing: {e}")
 
 if "df_extracted" in st.session_state:
   st.markdown("---")
