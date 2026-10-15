@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import io
 import json
 import re
+import time
 from google import genai
 from google.genai import types
 import openpyxl
@@ -15,15 +16,15 @@ except ImportError:
   fitz = None
 
 st.set_page_config(
-    page_title="PigKnows Service & Arrival Processor",
+    page_title="PigKnows Resilient Batch Processor",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 st.title("🐖 PigKnows Resilient Batch Processor")
 st.write(
-    "Upload your scanned service sheets (PDF or images). Fast, robust, and"
-    " crash-proof."
+    "Upload your scanned service sheets (PDF or images). Features automatic"
+    " traffic retry protection."
 )
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -89,7 +90,9 @@ if uploaded_files:
           " Secrets."
       )
     else:
-      with st.spinner("Processing pages with Gemini AI..."):
+      with st.spinner(
+          "Processing pages with Gemini AI (with auto-retry protection)..."
+      ):
         try:
           client = genai.Client(api_key=api_key)
           all_parsed_rows = []
@@ -115,9 +118,19 @@ if uploaded_files:
                         Return ONLY valid JSON list. No markdown wrappers or conversational text.
                         """
 
-            response = client.models.generate_content(
-                model="gemini-3.8-flash", contents=[image_part, prompt]
-            )
+            # Retry loop to handle 533/503 high demand spikes gracefully
+            response = None
+            max_retries = 3
+            for attempt in range(max_retries):
+              try:
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash", contents=[image_part, prompt]
+                )
+                break
+              except Exception as api_err:
+                if attempt == max_retries - 1:
+                  raise api_err
+                time.sleep(2 * (attempt + 1))  # Wait before retrying
 
             content = response.text.strip()
             if "```json" in content:
@@ -133,7 +146,10 @@ if uploaded_files:
           st.rerun()
 
         except Exception as e:
-          st.error(f"Error during AI vision parsing: {e}")
+          st.error(
+              f"Error during AI vision parsing: {e}. Please wait a moment and"
+              " try clicking extract again."
+          )
 
 if "df_extracted" in st.session_state:
   st.markdown("---")
