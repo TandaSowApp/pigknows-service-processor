@@ -21,8 +21,8 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Cloud Batch Processor")
-st.write("Upload your scanned service sheets. Ready for processing.")
+st.title("🐖 PigKnows Batch Processor")
+st.write("Upload your scanned service sheets for instant Excel conversion.")
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
 
@@ -37,7 +37,7 @@ with st.sidebar:
   st.markdown("- Arrival Date: **1 day before 1st breeding**")
 
 uploaded_files = st.file_uploader(
-    "Upload Service Sheet Scans (PDF, PNG, JPG) - Keep under 5MB / 200 DPI",
+    "Upload Service Sheet Scans (PDF, PNG, JPG)",
     type=["pdf", "png", "jpg", "jpeg"],
     accept_multiple_files=True,
 )
@@ -96,7 +96,7 @@ if uploaded_files:
 
         for idx, img_bytes in enumerate(image_bytes_list):
           status_text.text(
-              f"Processing page {idx + 1} of {total_pages} using Gemini 2.5"
+              f"Processing page {idx + 1} of {total_pages} with Gemini 3.8"
               " Flash..."
           )
           image_part = types.Part.from_bytes(
@@ -119,9 +119,19 @@ if uploaded_files:
                         Return ONLY valid JSON list. No markdown wrappers or conversational text.
                         """
 
-          response = client.models.generate_content(
-              model="gemini-2.5-flash", contents=[image_part, prompt]
-          )
+          # Paced retry loop using the required model
+          response = None
+          max_retries = 3
+          for attempt in range(max_retries):
+            try:
+              response = client.models.generate_content(
+                  model="gemini-3.8-flash", contents=[image_part, prompt]
+              )
+              break
+            except Exception as api_err:
+              if attempt == max_retries - 1:
+                raise api_err
+              time.sleep(2 * (attempt + 1))
 
           content = response.text.strip()
           if "```json" in content:
@@ -134,7 +144,7 @@ if uploaded_files:
 
           progress_bar.progress((idx + 1) / total_pages)
           if idx < total_pages - 1:
-            time.sleep(1)
+            time.sleep(1.5)
 
         status_text.text("Extraction complete!")
         st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
