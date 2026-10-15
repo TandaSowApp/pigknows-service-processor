@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 import openpyxl
 import pandas as pd
+from PIL import Image
 import streamlit as st
 
 try:
@@ -19,11 +20,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Multi-Page & Multi-Scan Batch Processor")
+st.title("🐖 PigKnows Fast Batch Processor")
 st.write(
-    "Upload multiple scanned service sheets (PDFs or images) at once. The app"
-    " processes all pages, detects batch numbers, extracts services and Alt ID"
-    " arrivals, and builds unified Excel files."
+    "Upload your scanned service sheets. Optimized for fast processing, batch"
+    " detection, and instant Excel generation."
 )
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -45,17 +45,24 @@ uploaded_files = st.file_uploader(
 )
 
 
-def convert_pdf_to_images(pdf_bytes):
-  images = []
+def convert_pdf_to_optimized_images(pdf_bytes):
+  images_bytes = []
   if not fitz:
     st.error("PyMuPDF (fitz) is missing from requirements.txt")
-    return images
+    return images_bytes
   doc = fitz.open(stream=pdf_bytes, filetype="pdf")
   for page_num in range(len(doc)):
     page = doc[page_num]
-    pix = page.get_pixmap(dpi=200)
-    images.append(pix.tobytes("jpeg"))
-  return images
+    # Lower DPI to 120 and resize to prevent memory crashes while keeping text sharp
+    pix = page.get_pixmap(dpi=120)
+    img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
+
+    # Resize if too large
+    img.thumbnail((1600, 1600))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=85)
+    images_bytes.append(buffer.getvalue())
+  return images_bytes
 
 
 if uploaded_files:
@@ -64,26 +71,26 @@ if uploaded_files:
   for uploaded_file in uploaded_files:
     if uploaded_file.type == "application/pdf":
       pdf_bytes = uploaded_file.getvalue()
-      pages_imgs = convert_pdf_to_images(pdf_bytes)
+      pages_imgs = convert_pdf_to_optimized_images(pdf_bytes)
       image_bytes_list.extend(pages_imgs)
     else:
-      image_bytes_list.append(uploaded_file.getvalue())
+      # Compress uploaded image
+      img = Image.open(uploaded_file)
+      img.thumbnail((1600, 1600))
+      buffer = io.BytesIO()
+      img.save(buffer, format="JPEG", quality=85)
+      image_bytes_list.append(buffer.getvalue())
 
-  st.info(
-      f"Loaded {len(uploaded_files)} file(s) resulting in"
-      f" {len(image_bytes_list)} total page(s) to process."
-  )
+  st.info(f"Prepared {len(image_bytes_list)} page(s) for fast processing.")
 
-  if st.button("🔍 Extract Data from All Pages", type="primary"):
+  if st.button("🔍 Extract Data Instantly", type="primary"):
     if not api_key:
       st.error(
           "API key not found. Please add GEMINI_API_KEY to your Streamlit App"
           " Secrets."
       )
     else:
-      with st.spinner(
-          "Reading all pages, batch headers, handwriting, and Alt ID arrivals..."
-      ):
+      with st.spinner("Processing pages with Gemini AI..."):
         try:
           client = genai.Client(api_key=api_key)
           all_parsed_rows = []
@@ -123,10 +130,7 @@ if uploaded_files:
             all_parsed_rows.extend(page_rows)
 
           st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
-          st.success(
-              f"Successfully extracted {len(all_parsed_rows)} total rows across"
-              f" {len(image_bytes_list)} page(s)!"
-          )
+          st.success("Extraction complete!")
           st.rerun()
 
         except Exception as e:
@@ -167,7 +171,6 @@ if "df_extracted" in st.session_state:
     last_tech1 = "VA"
     last_tech2 = "V2"
 
-    # Find first valid breeding date to calculate arrival date (1 day before)
     first_breeding_date = None
     for _, row in edited_df.iterrows():
       dt_str = str(row["Event Date"]).strip()
@@ -179,7 +182,7 @@ if "df_extracted" in st.session_state:
           pass
 
     if not first_breeding_date:
-      first_breeding_date = datetime(2026, 10, 9)  # Fallback
+      first_breeding_date = datetime(2026, 10, 9)
 
     arrival_date_str = (first_breeding_date - timedelta(days=1)).strftime(
         "%Y-%m-%d"
