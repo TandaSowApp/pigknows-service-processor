@@ -1,40 +1,29 @@
 from datetime import datetime, timedelta
 import io
-import os
-import easyocr
-import numpy as np
+import json
+from google import genai
 import openpyxl
 import pandas as pd
-from PIL import Image
 import streamlit as st
 
-# PDF processing library
 try:
   import fitz  # PyMuPDF
 except ImportError:
   fitz = None
 
 st.set_page_config(
-    page_title="PigKnows Service Sheet Processor",
+    page_title="PigKnows Service Sheet Processor (Free)",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Service Sheet Processor (Local & Free)")
+st.title("🐖 PigKnows Service Sheet Processor (Gemini Free Tier)")
 st.write(
-    "Upload your scanned service sheet (PDF or image). The app uses local OCR"
-    " to read the handwriting instantly with zero API keys required."
+    "Upload your scanned service sheet (PDF or image). Powered by Google's"
+    " free Gemini vision model."
 )
 
-
-# Load EasyOCR reader once and cache it for performance
-@st.cache_resource
-def get_ocr_reader():
-  return easyocr.Reader(["en"], gpu=False)
-
-
-with st.spinner("Loading local OCR engine (first run may take a moment)..."):
-  reader = get_ocr_reader()
+api_key = st.secrets.get("GEMINI_API_KEY", "")
 
 with st.sidebar:
   st.header("Rules Enforced")
@@ -67,75 +56,76 @@ if uploaded_file:
   image_bytes_list = []
 
   if uploaded_file.type == "application/pdf":
-    st.info("PDF file detected. Converting pages to images...")
+    st.info("PDF scan detected. Converting pages for vision processing...")
     pdf_bytes = uploaded_file.getvalue()
     image_bytes_list = convert_pdf_to_images(pdf_bytes)
   else:
     image_bytes_list = [uploaded_file.getvalue()]
     st.image(uploaded_file, caption="Uploaded Scan", use_container_width=True)
 
-  if st.button("🔍 Extract Data Locally", type="primary"):
-    with st.spinner("Reading handwriting locally..."):
-      extracted_rows = []
+  if st.button("🔍 Extract Data with Gemini Free AI", type="primary"):
+    if not api_key:
+      st.error(
+          "API key not found. Please add GEMINI_API_KEY to your Streamlit App"
+          " Secrets."
+      )
+    else:
+      with st.spinner(
+          "Reading handwriting and applying agricultural business rules..."
+      ):
+        try:
+          client = genai.Client(api_key=api_key)
+          all_parsed_rows = []
 
-      for img_bytes in image_bytes_list:
-        image = Image.open(io.BytesIO(img_bytes))
-        image_np = np.array(image)
+          for img_bytes in image_bytes_list:
+            image_part = {"mime_type": "image/jpeg", "data": img_bytes}
 
-        # Run local OCR
-        results = reader.readtext(image_np)
+            prompt = """
+                        You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets.
+                        Extract every row from the image into a JSON list of objects with these exact keys:
+                        - "Sow ID" (string, e.g., "6142")
+                        - "Event Date" (string in YYYY-MM-DD format, assuming year 2026)
+                        - "Tech 1" (string, e.g., "VA" or "V2")
+                        - "Tech 2" (string, e.g., "V2", "VA", or "X" if skipped/blank)
+                        - "Remark" (string, e.g., "Early", "Tra", or blank if none)
+                        - "Confidence" (float between 0.0 and 1.0 indicating OCR certainty on the Sow ID digits)
+                        
+                        Follow technician propagation rules: if Tech 1 or Tech 2 is blank on a row, it carries over from above.
+                        Return ONLY valid JSON list. No markdown wrappers or conversational text.
+                        """
 
-        # Basic sorting by vertical position (top to bottom)
-        results = sorted(results, key=lambda r: r[0][0][1])
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=[image_part, prompt]
+            )
 
-        # Group text fragments into structured rows or extract potential sow IDs/techs
-        # For a robust start, we extract detected text boxes and let you verify them in the editor
-        detected_texts = [res[1] for res in results]
-        confidence_scores = [res[2] for res in results]
+            content = response.text.strip()
+            if "```json" in content:
+              content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+              content = content.split("```")[1].split("```")[0].strip()
 
-        # Filter for likely sow IDs (4-digit numbers)
-        for text, conf in zip(detected_texts, confidence_scores):
-          cleaned = text.strip()
-          if cleaned.isdigit() and len(cleaned) == 4:
-            extracted_rows.append({
-                "Sow ID": cleaned,
-                "Confidence": float(conf),
-                "Event Date": "2026-10-09",  # Default baseline, editable
-                "Tech 1": "VA",
-                "Tech 2": "V2",
-                "Remark": "",
-            })
+            page_rows = json.loads(content)
+            all_parsed_rows.extend(page_rows)
 
-      if not extracted_rows:
-        # Fallback empty row if OCR didn't catch isolated 4-digit numbers automatically
-        extracted_rows.append({
-            "Sow ID": "6142",
-            "Confidence": 0.50,
-            "Event Date": "2026-10-09",
-            "Tech 1": "VA",
-            "Tech 2": "V2",
-            "Remark": "Early Tra",
-        })
+          st.session_state["df_extracted"] = pd.DataFrame(all_parsed_rows)
+          st.success("Extraction complete!")
+          st.rerun()
 
-      st.session_state["df_extracted"] = pd.DataFrame(extracted_rows)
-      st.success("Extraction complete!")
-      st.rerun()
+        except Exception as e:
+          st.error(f"Error during AI vision parsing: {e}")
 
-# Verification & Editing Table
 if "df_extracted" in st.session_state:
   st.markdown("---")
   st.subheader("📋 Step 2: Verify & Edit Extracted Data")
-  st.markdown(
-      "Review the parsed rows below and make any corrections before"
-      " downloading."
-  )
 
   edited_df = st.data_editor(
       st.session_state["df_extracted"],
       column_config={
-          "Sow ID": st.column_config.TextColumn("Sow ID", required=True),
+          "Sow ID": st.column_config.TextColumn(
+              "Sow ID (Verify digits)", required=True
+          ),
           "Confidence": st.column_config.ProgressColumn(
-              "OCR Confidence", min_value=0.0, max_value=1.0, format="%.2f"
+              "AI Confidence", min_value=0.0, max_value=1.0, format="%.2f"
           ),
           "Event Date": st.column_config.TextColumn("Event Date (YYYY-MM-DD)"),
           "Tech 1": st.column_config.TextColumn("Tech 1"),
@@ -227,7 +217,6 @@ if "df_extracted" in st.session_state:
 
     df_output = pd.DataFrame(final_rows)
 
-    # 5 standard header rows
     template_header_rows = [
         {
             ";Sow ID": ";",
@@ -374,7 +363,7 @@ if "df_extracted" in st.session_state:
             "Service Location": None,
             "Boar 1": None,
             "Tech 1": None,
-            "Date+2": None,
+            "Date 2": None,
             "Boar 2": None,
             "Tech 2": None,
             "Date 3": None,
