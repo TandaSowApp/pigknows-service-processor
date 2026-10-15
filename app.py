@@ -10,9 +10,9 @@ from PIL import Image
 import streamlit as st
 
 try:
-  from pdf2image import convert_from_bytes
+  import fitz  # PyMuPDF
 except ImportError:
-  convert_from_bytes = None
+  fitz = None
 
 st.set_page_config(
     page_title="PigKnows Service & Arrival Processor",
@@ -20,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Stable Batch Processor")
+st.title("🐖 PigKnows Native PDF & Batch Processor")
 st.write(
     "Upload your scanned service sheets (PDF or images). Fast, robust, and"
     " crash-proof."
@@ -45,17 +45,18 @@ uploaded_files = st.file_uploader(
 )
 
 
-def process_pdf_to_images(pdf_bytes):
+def convert_pdf_to_images(pdf_bytes):
   images_bytes = []
-  if not convert_from_bytes:
-    st.error(
-        "pdf2image is missing from requirements.txt or poppler is not installed."
-    )
+  if not fitz:
+    st.error("PyMuPDF (fitz) is missing from requirements.txt")
     return images_bytes
   try:
-    # Convert PDF bytes to PIL images
-    pil_images = convert_from_bytes(pdf_bytes, dpi=150)
-    for img in pil_images:
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page_num in range(len(doc)):
+      page = doc[page_num]
+      # 150 DPI is crisp for text and keeps file size tiny
+      pix = page.get_pixmap(dpi=150)
+      img = Image.open(io.BytesIO(pix.tobytes("jpeg")))
       img.thumbnail((1600, 1600))
       buffer = io.BytesIO()
       img.save(buffer, format="JPEG", quality=85)
@@ -71,7 +72,7 @@ if uploaded_files:
   for uploaded_file in uploaded_files:
     if uploaded_file.type == "application/pdf":
       pdf_bytes = uploaded_file.getvalue()
-      pages_imgs = process_pdf_to_images(pdf_bytes)
+      pages_imgs = convert_pdf_to_images(pdf_bytes)
       image_bytes_list.extend(pages_imgs)
     else:
       img = Image.open(uploaded_file)
