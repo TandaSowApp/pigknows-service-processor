@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import io
 import json
 from google import genai
+from google.genai import types
 import openpyxl
 import pandas as pd
 import streamlit as st
@@ -78,7 +79,10 @@ if uploaded_file:
           all_parsed_rows = []
 
           for img_bytes in image_bytes_list:
-            image_part = {"mime_type": "image/jpeg", "data": img_bytes}
+            # Correct SDK format for passing image bytes
+            image_part = types.Part.from_bytes(
+                data=img_bytes, mime_type="image/jpeg"
+            )
 
             prompt = """
                         You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets.
@@ -95,7 +99,7 @@ if uploaded_file:
                         """
 
             response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=[image_part, prompt]
+                model="gemini-2.0-flash", contents=[image_part, prompt]
             )
 
             content = response.text.strip()
