@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import io
 import json
+import re
 from google import genai
 from google.genai import types
 import openpyxl
@@ -13,15 +14,16 @@ except ImportError:
   fitz = None
 
 st.set_page_config(
-    page_title="PigKnows Service Sheet Processor (Free)",
+    page_title="PigKnows Service & Arrival Processor",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("🐖 PigKnows Service Sheet Processor (Gemini Free Tier)")
+st.title("🐖 PigKnows Dynamic Batch Service & Arrival Processor")
 st.write(
-    "Upload your scanned service sheet (PDF or image). Powered by Google's"
-    " free Gemini vision model."
+    "Upload your scanned service sheet. Automatically detects the batch"
+    " number from the page, parses services and Alt ID arrivals, and generates"
+    " both PigKnows-ready Excel files."
 )
 
 api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -29,10 +31,15 @@ api_key = st.secrets.get("GEMINI_API_KEY", "")
 with st.sidebar:
   st.header("Rules Enforced")
   st.markdown("- Year: **2026**")
+  st.markdown(
+      "- Service Group: **Dynamic (Detected from page header, e.g., Batch"
+      " 1–10)**"
+  )
   st.markdown("- Event Name: `SERVICE`")
   st.markdown("- Service Type: `3= MS (Mixed Semen)`")
   st.markdown("- Service Location: *Blank*")
   st.markdown("- Remark Precedence: `Early` > `Tra`")
+  st.markdown("- Arrival Date: **1 day before 1st breeding**")
 
 uploaded_file = st.file_uploader(
     "Upload Service Sheet Scan (PDF, PNG, JPG)",
@@ -72,32 +79,34 @@ if uploaded_file:
       )
     else:
       with st.spinner(
-          "Reading handwriting and applying agricultural business rules..."
+          "Reading batch header, handwriting, and Alt ID arrivals..."
       ):
         try:
           client = genai.Client(api_key=api_key)
           all_parsed_rows = []
+          detected_batch = 1  # Default fallback
 
-          for img_bytes in image_bytes_list:
+          for i, img_bytes in enumerate(image_bytes_list):
             image_part = types.Part.from_bytes(
                 data=img_bytes, mime_type="image/jpeg"
             )
 
             prompt = """
                         You are an expert agricultural data assistant parsing handwritten Pig Breeding Service sheets.
-                        Extract every row from the image into a JSON list of objects with these exact keys:
-                        - "Sow ID" (string, e.g., "6142")
-                        - "Event Date" (string in YYYY-MM-DD format, assuming year 2026)
-                        - "Tech 1" (string, e.g., "VA" or "V2")
-                        - "Tech 2" (string, e.g., "V2", "VA", or "X" if skipped/blank)
-                        - "Remark" (string, e.g., "Early", "Tra", or blank if none)
-                        - "Confidence" (float between 0.0 and 1.0 indicating OCR certainty on the Sow ID digits)
+                        1. Look at the top of the page header (e.g., 'Batch 2') and extract the batch/group number as an integer (1 to 10). Return it in your JSON structure or look for it.
+                        2. Extract every row from the image into a JSON list of objects with these exact keys:
+                           - "Batch" (integer, detected from the page header, e.g. 2)
+                           - "Sow ID" (string, e.g., "6142")
+                           - "Event Date" (string in YYYY-MM-DD format, assuming year 2026. Dates carry down if blank).
+                           - "Tech 1" (string, e.g., "VA" or "V2")
+                           - "Tech 2" (string, e.g., "V2", "VA", or "X" if skipped/blank)
+                           - "Comments" (string containing full comments text, e.g., "Alt 38310 B Early Tra" or blank)
+                           - "Confidence" (float between 0.0 and 1.0)
                         
                         Follow technician propagation rules: if Tech 1 or Tech 2 is blank on a row, it carries over from above.
                         Return ONLY valid JSON list. No markdown wrappers or conversational text.
                         """
 
-            # Updated to current standard model identifier
             response = client.models.generate_content(
                 model="gemini-3.8-flash", contents=[image_part, prompt]
             )
@@ -125,16 +134,17 @@ if "df_extracted" in st.session_state:
   edited_df = st.data_editor(
       st.session_state["df_extracted"],
       column_config={
-          "Sow ID": st.column_config.TextColumn(
-              "Sow ID (Verify digits)", required=True
+          "Batch": st.column_config.NumberColumn(
+              "Batch / Group", min_value=1, max_value=10, step=1, required=True
           ),
+          "Sow ID": st.column_config.TextColumn("Sow ID", required=True),
           "Confidence": st.column_config.ProgressColumn(
               "AI Confidence", min_value=0.0, max_value=1.0, format="%.2f"
           ),
           "Event Date": st.column_config.TextColumn("Event Date (YYYY-MM-DD)"),
           "Tech 1": st.column_config.TextColumn("Tech 1"),
           "Tech 2": st.column_config.TextColumn("Tech 2"),
-          "Remark": st.column_config.TextColumn("Remark"),
+          "Comments": st.column_config.TextColumn("Comments"),
       },
       disabled=["Confidence"],
       num_rows="dynamic",
@@ -142,20 +152,46 @@ if "df_extracted" in st.session_state:
   )
 
   if st.button(
-      "🚀 Generate PigKnows-Ready Excel File",
+      "🚀 Generate PigKnows Excel Files (Services & Arrivals)",
       type="primary",
       use_container_width=True,
   ):
-    final_rows = []
+    service_rows = []
+    arrival_rows = []
+
     last_tech1 = "VA"
     last_tech2 = "V2"
+
+    # Find first valid breeding date to calculate arrival date (1 day before)
+    first_breeding_date = None
+    for _, row in edited_df.iterrows():
+      dt_str = str(row["Event Date"]).strip()
+      if dt_str and dt_str != "nan":
+        try:
+          first_breeding_date = datetime.strptime(dt_str, "%Y-%m-%d")
+          break
+        except ValueError:
+          pass
+
+    if not first_breeding_date:
+      first_breeding_date = datetime(2026, 10, 9)  # Fallback
+
+    arrival_date_str = (first_breeding_date - timedelta(days=1)).strftime(
+        "%Y-%m-%d"
+    )
 
     for _, row in edited_df.iterrows():
       sow_id = str(row["Sow ID"]).strip()
       event_date = str(row["Event Date"]).strip()
       t1 = str(row["Tech 1"]).strip() if pd.notna(row["Tech 1"]) else ""
       t2 = str(row["Tech 2"]).strip() if pd.notna(row["Tech 2"]) else ""
-      comment = str(row["Remark"]).strip() if pd.notna(row["Remark"]) else ""
+      comments = str(row["Comments"]).strip() if pd.notna(row["Comments"]) else ""
+
+      # Get batch number from row, defaulting to 1 if invalid
+      try:
+        batch_num = int(row["Batch"])
+      except (ValueError, TypeError):
+        batch_num = 1
 
       if t1 != "":
         last_tech1 = t1
@@ -169,10 +205,17 @@ if "df_extracted" in st.session_state:
 
       actual_t2 = "" if t2.upper() == "X" else t2
 
+      # Extract Alt ID if present in comments (e.g. "Alt 38310 B")
+      alt_id = ""
+      alt_match = re.search(r"alt\s*([0-9a-zA-Z-]+)", comments, re.IGNORECASE)
+      if alt_match:
+        alt_id = alt_match.group(1)
+
+      # Clean remarks
       cleaned_remark = ""
-      if "early" in comment.lower():
+      if "early" in comments.lower():
         cleaned_remark = "Early"
-      elif "tra" in comment.lower():
+      elif "tra" in comments.lower():
         cleaned_remark = "Tra"
 
       date2 = ""
@@ -183,44 +226,55 @@ if "df_extracted" in st.session_state:
         except ValueError:
           date2 = ""
 
-      pigknows_row = {
-          ";Sow ID": sow_id,
-          "Event Date": event_date,
-          "Event Name": "SERVICE",
-          "Service Group": 1,
-          "Service Type": "3= MS (Mixed Semen)",
-          "Service Location": "",
-          "Boar 1": "",
-          "Tech 1": t1,
-          "Date 2": date2,
-          "Boar 2": "",
-          "Tech 2": actual_t2,
-          "Date 3": "",
-          "Boar 3": "",
-          "Tech 3": "",
-          "Remark": cleaned_remark,
-          "Semen Age 1": "",
-          "Semen Age 2": "",
-          "Semen Age 3": "",
-          "Serv Score 1": "",
-          "Serv Time 1": "",
-          "Serv Time 2": "",
-          "Serv Time 3": "",
-          "Serv Score 2": "",
-          "Serv Score 3": "",
-          "Weight": "",
-          "Sow Weight": "",
-          "Date 4": "",
-          "Boar 4": "",
-          "Tech 4": "",
-          "Date 5": "",
-          "Boar 5": "",
-          "Tech 5": "",
-      }
-      final_rows.append(pigknows_row)
+      # 1. Build Service Row with dynamic Service Group
+      if sow_id and sow_id != "nan":
+        service_rows.append({
+            ";Sow ID": sow_id,
+            "Event Date": event_date,
+            "Event Name": "SERVICE",
+            "Service Group": batch_num,
+            "Service Type": "3= MS (Mixed Semen)",
+            "Service Location": "",
+            "Boar 1": "",
+            "Tech 1": t1,
+            "Date 2": date2,
+            "Boar 2": "",
+            "Tech 2": actual_t2,
+            "Date 3": "",
+            "Boar 3": "",
+            "Tech 3": "",
+            "Remark": cleaned_remark,
+            "Semen Age 1": "",
+            "Semen Age 2": "",
+            "Semen Age 3": "",
+            "Serv Score 1": "",
+            "Serv Time 1": "",
+            "Serv Time 2": "",
+            "Serv Time 3": "",
+            "Serv Score 2": "",
+            "Serv Score 3": "",
+            "Weight": "",
+            "Sow Weight": "",
+            "Date 4": "",
+            "Boar 4": "",
+            "Tech 4": "",
+            "Date 5": "",
+            "Boar 5": "",
+            "Tech 5": "",
+        })
 
-    df_output = pd.DataFrame(final_rows)
+        # 2. Build Arrival Row if Alt ID exists
+        if alt_id:
+          arrival_rows.append({
+              ";Sow ID": sow_id,
+              "Event Date": arrival_date_str,
+              "Event Name": "ARRIVAL",
+              "Alt ID": alt_id,
+              "Batch": batch_num,
+          })
 
+    # --- Generate Service Excel ---
+    df_services = pd.DataFrame(service_rows)
     template_header_rows = [
         {
             ";Sow ID": ";",
@@ -394,20 +448,40 @@ if "df_extracted" in st.session_state:
         },
     ]
 
-    df_final = pd.concat(
-        [pd.DataFrame(template_header_rows), df_output], ignore_index=True
+    df_services_final = pd.concat(
+        [pd.DataFrame(template_header_rows), df_services], ignore_index=True
     )
 
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-      df_final.to_excel(writer, sheet_name="SERVICE", index=False)
+    serv_buffer = io.BytesIO()
+    with pd.ExcelWriter(serv_buffer, engine="openpyxl") as writer:
+      df_services_final.to_excel(writer, sheet_name="SERVICE", index=False)
 
-    st.success("Excel file successfully built!")
-    st.download_button(
-        label="📥 Download PigKnows_Services.xlsx",
-        data=buffer.getvalue(),
-        file_name="PigKnows_Services.xlsx",
-        mime=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-    )
+    # --- Generate Arrivals Excel ---
+    df_arrivals = pd.DataFrame(arrival_rows)
+    arr_buffer = io.BytesIO()
+    with pd.ExcelWriter(arr_buffer, engine="openpyxl") as writer:
+      df_arrivals.to_excel(writer, sheet_name="ARRIVAL", index=False)
+
+    st.success("Excel files successfully built!")
+
+    col1, col2 = st.columns(2)
+    with col1:
+      st.download_button(
+          label="📥 Download PigKnows_Services.xlsx",
+          data=serv_buffer.getvalue(),
+          file_name="PigKnows_Services.xlsx",
+          mime=(
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          ),
+          use_container_width=True,
+      )
+    with col2:
+      st.download_button(
+          label="📥 Download PigKnows_Arrivals.xlsx",
+          data=arr_buffer.getvalue(),
+          file_name="PigKnows_Arrivals.xlsx",
+          mime=(
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+          ),
+          use_container_width=True,
+      )
